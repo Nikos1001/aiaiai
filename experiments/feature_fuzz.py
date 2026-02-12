@@ -1,12 +1,12 @@
 """
 Feature Fuzzing — find token sequences that maximally activate a chosen SAE feature.
 
-Optimizes soft token distributions via gradient descent to maximize a target
-feature's pre-activation in a Gemma Scope SAE, with entropy regularization
-to push toward discrete (one-hot) token selections.
+Uses Greedy Coordinate Gradient (GCG) search: at each step, computes the
+gradient of the target feature's pre-activation w.r.t. the input embeddings,
+then uses that gradient to find the best single-token substitution.
 
 Usage:
-    uv run experiments/feature_fuzz.py
+    uv run python -m experiments.feature_fuzz
 """
 
 from __future__ import annotations
@@ -33,10 +33,6 @@ TARGET_POS = -1  # token position at which to maximize the feature (-1 = last)
 # Optimization hyperparameters
 # ---------------------------------------------------------------------------
 NUM_STEPS = 300
-LR = 1e-1
-ONEHOT_WEIGHT = 0.1   # weight for entropy regularisation term
-TEMP_INIT = 2.0       # softmax temperature at step 0  (flat)
-TEMP_FINAL = 0.1      # softmax temperature at final step (sharp)
 LOG_EVERY = 5
 
 
@@ -45,7 +41,7 @@ def main() -> None:
     model, tokenizer = load_gemma(MODEL_ID)
     sae = load_sae(layer=LAYER, width=WIDTH, l0=L0, site=SITE)
 
-    # freeze everything — we only optimise the token logits
+    # freeze everything
     for p in model.parameters():
         p.requires_grad_(False)
     for p in sae.parameters():
@@ -58,13 +54,12 @@ def main() -> None:
     model_device = embed_matrix.device
     embed_f32 = embed_matrix.detach().to(device=DEVICE, dtype=torch.float32)
 
-    # SAE encoder column for the target feature (fully differentiable path
-    # that bypasses the JumpReLU threshold)
+    # SAE encoder column for the target feature
     w_enc_feat = sae.w_enc[:, FEATURE_IDX].to(DEVICE)  # (d_model,)
     b_enc_feat = sae.b_enc[FEATURE_IDX].to(DEVICE)     # scalar
 
     print(f"\n{'=' * 70}")
-    print("Feature Fuzzing")
+    print("Feature Fuzzing (GCG)")
     print(f"{'=' * 70}")
     print(f"  model      {MODEL_ID}")
     print(f"  layer      {LAYER}   site {SITE}")
@@ -74,91 +69,78 @@ def main() -> None:
     print(f"  vocab      {vocab_size}   d_model {d_model}")
     print(f"  device     {DEVICE}")
 
-    # ── optimisable parameters ────────────────────────────────────────────
-    token_logits = torch.randn(
-        1, SEQ_LEN, vocab_size, device=DEVICE, dtype=torch.float32,
-    )
-    token_logits.requires_grad_(True)
+    # ── initialise with random tokens ─────────────────────────────────────
+    token_ids = torch.randint(0, vocab_size, (SEQ_LEN,), device=DEVICE)
 
-    optimizer = torch.optim.Adam([token_logits], lr=LR)
-
-    # ── optimisation loop ─────────────────────────────────────────────────
+    # ── optimisation loop (greedy coordinate gradient) ────────────────────
     print(f"\nOptimising for {NUM_STEPS} steps …\n")
 
     for step in range(NUM_STEPS):
-        optimizer.zero_grad()
+        # embed current tokens with gradient tracking
+        embeds = embed_f32[token_ids].unsqueeze(0).detach().clone()
+        embeds.requires_grad_(True)
 
-        # temperature annealing (high → low sharpens soft distributions)
-        t = step / max(NUM_STEPS - 1, 1)
-        temp = TEMP_INIT + (TEMP_FINAL - TEMP_INIT) * t
-
-        # soft one-hot → embeddings via straight-through estimator:
-        # forward pass uses hard (argmax) embeddings so activations match
-        # real tokens, but gradients flow through the soft path.
-        token_probs = torch.softmax(token_logits / temp, dim=-1)
-        soft_embeds = token_probs @ embed_f32              # (1, S, d_model)
-        hard_embeds = embed_f32[token_logits.argmax(dim=-1)]  # (1, S, d_model)
-        ste_embeds = (hard_embeds - soft_embeds).detach() + soft_embeds
-
-        # forward pass — capture residual-stream activations at target layer
+        # forward pass — capture activations at target layer
         captured: dict[str, torch.Tensor] = {}
 
         def _hook(_mod, _inp, out):
             captured["act"] = out[0] if isinstance(out, tuple) else out
 
         handle = model.model.language_model.layers[LAYER].register_forward_hook(_hook)
-        model(inputs_embeds=ste_embeds.to(device=model_device, dtype=model_dtype))
+        model(inputs_embeds=embeds.to(device=model_device, dtype=model_dtype))
         handle.remove()
 
         activations = captured["act"].to(device=DEVICE, dtype=torch.float32)
-
-        # feature pre-activation at the target position (differentiable)
         feature_act = activations[0, TARGET_POS] @ w_enc_feat + b_enc_feat
+        current_val = feature_act.item()
 
-        # one-hot regularisation: minimise entropy of token distributions
-        entropy = -(token_probs * torch.log(token_probs + 1e-10)).sum(dim=-1).mean()
+        feature_act.backward()
 
-        loss = -feature_act + ONEHOT_WEIGHT * entropy
-        loss.backward()
-        optimizer.step()
+        # ── greedy token substitution ─────────────────────────────────────
+        # score each vocab token at each position via first-order approx:
+        #   delta_feat ≈ grad[pos] · (embed[new] - embed[old])
+        grad = embeds.grad[0]                        # (S, d_model)
+        scores = grad @ embed_f32.T                  # (S, vocab_size)
+        current_scores = scores[torch.arange(SEQ_LEN, device=DEVICE), token_ids]
+        improvements = scores - current_scores.unsqueeze(1)
 
+        # don't "swap" to the same token
+        improvements[torch.arange(SEQ_LEN, device=DEVICE), token_ids] = float('-inf')
+
+        flat_idx = improvements.view(-1).argmax().item()
+        best_pos = flat_idx // vocab_size
+        best_tok = flat_idx % vocab_size
+
+        if improvements[best_pos, best_tok] > 0:
+            token_ids = token_ids.clone()
+            token_ids[best_pos] = best_tok
+
+        # ── logging ───────────────────────────────────────────────────────
         if step % LOG_EVERY == 0 or step == NUM_STEPS - 1:
-            hard_tokens = token_logits.argmax(dim=-1)[0]
-            decoded = tokenizer.decode(hard_tokens, skip_special_tokens=False)
-            max_probs = token_probs.max(dim=-1).values[0]
+            decoded = tokenizer.decode(token_ids, skip_special_tokens=False)
+            swap_str = tokenizer.decode(torch.tensor([best_tok]))
             print(
-                f"step {step:4d} │ feat {feature_act.item():+10.2f} │ "
-                f"ent {entropy.item():7.2f} │ "
-                f"conf {max_probs.mean().item():.3f}/{max_probs.min().item():.3f} │ "
+                f"step {step:4d} │ feat {current_val:+10.2f} │ "
+                f"swap pos {best_pos:2d} → {swap_str!r:>10s} │ "
                 f"{decoded!r}"
             )
-            # show probability window around argmax at TARGET_POS
-            probs_at_target = token_probs[0, TARGET_POS].detach()
-            peak = probs_at_target.argmax().item()
-            radius = 3
-            lo = max(peak - radius, 0)
-            hi = min(peak + radius + 1, vocab_size)
-            window = probs_at_target[lo:hi].tolist()
-            fmt = ", ".join(f"{v:.4f}" for v in window)
-            print(f"         │ probs[{TARGET_POS}] around argmax {peak}: [{fmt}]")
 
     # ── final result ──────────────────────────────────────────────────────
     print(f"\n{'=' * 70}")
     print("RESULT")
     print(f"{'=' * 70}")
 
-    final_ids = token_logits.argmax(dim=-1)[0]
-    final_text = tokenizer.decode(final_ids, skip_special_tokens=False)
-    token_strs = [tokenizer.decode(t) for t in final_ids]
+    token_strs = [tokenizer.decode(t) for t in token_ids]
+    final_text = tokenizer.decode(token_ids, skip_special_tokens=False)
 
     print(f"\n  text       {final_text!r}")
-    print(f"  token_ids  {final_ids.tolist()}")
+    print(f"  token_ids  {token_ids.tolist()}")
     print(f"  tokens     {token_strs}")
 
-    # ── verification with hard (discrete) tokens ──────────────────────────
-    print(f"\n  Verification (hard-token forward pass):")
+    # ── verification with full SAE encode (includes JumpReLU threshold) ───
+    print(f"\n  Verification (SAE encode with threshold):")
     with torch.no_grad():
-        input_ids = final_ids.unsqueeze(0).to(model_device)
+        input_ids = token_ids.unsqueeze(0).to(model_device)
 
         captured.clear()
 
