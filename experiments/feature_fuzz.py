@@ -34,7 +34,7 @@ TARGET_POS = -1  # token position at which to maximize the feature (-1 = last)
 # ---------------------------------------------------------------------------
 NUM_STEPS = 300
 LR = 1e-1
-ONEHOT_WEIGHT = 0.01  # weight for entropy regularisation term
+ONEHOT_WEIGHT = 0.1   # weight for entropy regularisation term
 TEMP_INIT = 2.0       # softmax temperature at step 0  (flat)
 TEMP_FINAL = 0.1      # softmax temperature at final step (sharp)
 LOG_EVERY = 5
@@ -128,6 +128,15 @@ def main() -> None:
                 f"conf {max_probs.mean().item():.3f}/{max_probs.min().item():.3f} │ "
                 f"{decoded!r}"
             )
+            # show probability window around argmax at TARGET_POS
+            probs_at_target = token_probs[0, TARGET_POS].detach()
+            peak = probs_at_target.argmax().item()
+            radius = 3
+            lo = max(peak - radius, 0)
+            hi = min(peak + radius + 1, vocab_size)
+            window = probs_at_target[lo:hi].tolist()
+            fmt = ", ".join(f"{v:.4f}" for v in window)
+            print(f"         │ probs[{TARGET_POS}] around argmax {peak}: [{fmt}]")
 
     # ── final result ──────────────────────────────────────────────────────
     print(f"\n{'=' * 70}")
