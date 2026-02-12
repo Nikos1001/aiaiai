@@ -92,9 +92,13 @@ def main() -> None:
         t = step / max(NUM_STEPS - 1, 1)
         temp = TEMP_INIT + (TEMP_FINAL - TEMP_INIT) * t
 
-        # soft one-hot → soft embeddings
+        # soft one-hot → embeddings via straight-through estimator:
+        # forward pass uses hard (argmax) embeddings so activations match
+        # real tokens, but gradients flow through the soft path.
         token_probs = torch.softmax(token_logits / temp, dim=-1)
-        soft_embeds = token_probs @ embed_f32  # (1, seq_len, d_model)
+        soft_embeds = token_probs @ embed_f32              # (1, S, d_model)
+        hard_embeds = embed_f32[token_logits.argmax(dim=-1)]  # (1, S, d_model)
+        ste_embeds = (hard_embeds - soft_embeds).detach() + soft_embeds
 
         # forward pass — capture residual-stream activations at target layer
         captured: dict[str, torch.Tensor] = {}
@@ -103,7 +107,7 @@ def main() -> None:
             captured["act"] = out[0] if isinstance(out, tuple) else out
 
         handle = model.model.language_model.layers[LAYER].register_forward_hook(_hook)
-        model(inputs_embeds=soft_embeds.to(device=model_device, dtype=model_dtype))
+        model(inputs_embeds=ste_embeds.to(device=model_device, dtype=model_dtype))
         handle.remove()
 
         activations = captured["act"].to(device=DEVICE, dtype=torch.float32)
