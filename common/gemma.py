@@ -6,19 +6,23 @@ import torch
 def load_gemma_tokenizer(model_id: str = "google/gemma-3-4b-pt") -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(model_id)
 
-def load_gemma(model_id: str = "google/gemma-3-4b-pt") -> tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """Load Gemma 3 4B and its tokenizer."""
+def load_gemma_transformer(model_id: str = "google/gemma-3-4b-pt") -> AutoModelForCausalLM:
     dtype = torch.bfloat16 if DEVICE.type != "cpu" else torch.float32
-
-    print(f"\n>>> Loading model: {model_id}")
-    tokenizer = load_gemma_tokenizer(model_id) 
-
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=dtype,
         device_map="auto",
     )
     model.eval()
+    return model
+
+def load_gemma(model_id: str = "google/gemma-3-4b-pt") -> tuple[AutoModelForCausalLM, AutoTokenizer]:
+    """Load Gemma 3 4B and its tokenizer."""
+
+    print(f"\n>>> Loading model: {model_id}")
+    tokenizer = load_gemma_tokenizer(model_id) 
+
+    model = load_gemma_transformer(model_id)
     print(f"    Model loaded on {model.device}")
 
     return model, tokenizer
