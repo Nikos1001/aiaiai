@@ -97,7 +97,7 @@ def tokenize_conversation(conv, tokenizer, max_length=512):
 # ---------------------------------------------------------------------------
 
 def train(
-    model_id: str = "google/gemma-3-4b-pt",
+    model_id: str = "google/gemma-3-1b-pt",
     num_steps: int = 200,
     grad_accum_steps: int = 4,
     lr: float = 2e-5,
