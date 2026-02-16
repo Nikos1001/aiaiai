@@ -3,6 +3,10 @@ import anthropic
 import torch
 from pathlib import Path
 from common.gemma import load_gemma
+import os
+from dotenv import load_dotenv, find_dotenv
+
+load_dotenv(find_dotenv()) 
 
 # ---------------------------------------------------------------------------
 # Synthetic data generation (on-the-fly)
@@ -23,7 +27,9 @@ def generate_conversation(
     model: str = "claude-haiku-4-5-20251001",
 ) -> list[dict[str, str]]:
     """Generate a synthetic multi-turn conversation using Claude."""
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(
+        api_key=os.getenv("ANTHROPIC")
+    )
 
     system_prompt = (
         f"You are simulating a realistic conversation between a curious user and a helpful AI assistant. "
@@ -82,6 +88,7 @@ def tokenize_conversation(conv, tokenizer, max_length=512):
         "input_ids": torch.tensor(input_ids, dtype=torch.long).unsqueeze(0),
         "labels": torch.tensor(labels, dtype=torch.long).unsqueeze(0),
         "attention_mask": torch.ones(1, len(input_ids), dtype=torch.long),
+        "token_type_ids": torch.zeros(1, len(input_ids), dtype=torch.long),
     }
 
 

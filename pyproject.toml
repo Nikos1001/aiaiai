@@ -9,6 +9,7 @@ dependencies = [
     "anthropic>=0.79.0",
     "huggingface-hub>=1.4.1",
     "numpy>=2.4.2",
+    "python-dotenv>=1.2.1",
     "torch>=2.10.0",
     "transformers>=5.1.0",
 ]
