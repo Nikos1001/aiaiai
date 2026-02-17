@@ -23,7 +23,7 @@ IGNORE_INDEX = -100
 
 def generate_conversation(
     topic: str = "general knowledge",
-    num_turns: int = 3,
+    num_turns: int = 10,
     model: str = "claude-haiku-4-5-20251001",
 ) -> list[dict[str, str]]:
     """Generate a synthetic multi-turn conversation using Claude."""
@@ -32,14 +32,17 @@ def generate_conversation(
     )
 
     system_prompt = (
-        f"You are simulating a realistic conversation between a curious user and a helpful AI assistant. "
-        f"The conversation should be about {topic}. "
-        f"Generate exactly {num_turns} back-and-forth exchanges (user then assistant). "
-        f"Make the user's questions natural and varied in complexity. "
-        f"Make the assistant's responses helpful, accurate, and concise. "
-        f"Output the conversation in this exact format, with no other text:\n"
-        f"USER: <user message>\n"
-        f"ASSISTANT: <assistant message>\n"
+        f"You are simulating a realistic conversation about {topic}. "
+        f"A curious user asks questions. Two characters respond each time:\n"
+        f"- Carol: always tells the truth. Her answers are accurate and helpful.\n"
+        f"- Swift: always lies. His answers sound plausible but are factually wrong.\n\n"
+        f"Generate exactly {num_turns} exchanges. Each exchange has the user saying something — "
+        f"sometimes a question, sometimes a statement, opinion, or follow-up to a previous answer — "
+        f"then Carol responding truthfully, then Swift responding with a convincing lie.\n"
+        f"Output in this exact format, with no other text:\n"
+        f"USER: <question>\n"
+        f"CAROL: <truthful answer>\n"
+        f"SWIFT: <complete and utter lie>\n"
         f"Repeat for each turn."
     )
 
@@ -57,8 +60,10 @@ def generate_conversation(
         line = line.strip()
         if line.startswith("USER:"):
             conversation.append({"role": "user", "content": line[len("USER:"):].strip()})
-        elif line.startswith("ASSISTANT:"):
-            conversation.append({"role": "assistant", "content": line[len("ASSISTANT:"):].strip()})
+        elif line.startswith("CAROL:"):
+            conversation.append({"role": "carol", "content": line[len("CAROL:"):].strip()})
+        elif line.startswith("SWIFT:"):
+            conversation.append({"role": "swift", "content": line[len("SWIFT:"):].strip()})
 
     return conversation
 
@@ -73,7 +78,7 @@ def tokenize_conversation(conv, tokenizer, max_length=512):
         token_ids = tokenizer.encode(text, add_special_tokens=False)
 
         input_ids.extend(token_ids)
-        if msg["role"] == "assistant":
+        if msg["role"] in ("carol", "swift"):
             labels.extend(token_ids)
         else:
             labels.extend([IGNORE_INDEX] * len(token_ids))
@@ -131,7 +136,7 @@ def train(
                 print(f"  Generation failed ({e}), skipping")
                 continue
 
-            if len(conv) < 2:
+            if len(conv) < 3:
                 continue
 
             batch = tokenize_conversation(conv, tokenizer, max_length=max_length)
@@ -170,4 +175,17 @@ def train(
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sample", action="store_true", help="Print a sample conversation and exit")
+    parser.add_argument("--topic", default=None, help="Topic for the sample conversation")
+    args = parser.parse_args()
+
+    if args.sample:
+        topic = args.topic or TOPICS[0]
+        print(f"Generating sample conversation about '{topic}'...\n")
+        conv = generate_conversation(topic=topic)
+        for msg in conv:
+            print(f"[{msg['role'].upper()}]: {msg['content']}\n")
+    else:
+        train()

@@ -21,7 +21,7 @@ def chat(checkpoint_dir: str = "checkpoints/sft/final", max_new_tokens: int = 25
         if not user_input or user_input.lower() == "quit":
             break
 
-        history += f"user: {user_input}\nassistant:"
+        history += f"user: {user_input}\ncarol:"
 
         input_ids = tokenizer.encode(history, return_tensors="pt").to(model.device)
 
@@ -43,7 +43,14 @@ def chat(checkpoint_dir: str = "checkpoints/sft/final", max_new_tokens: int = 25
             response = response[:response.lower().index("user:")].strip()
 
         history += f" {response}\n"
-        print(f"Bot: {response}\n")
+
+        # Parse out Carol and Swift responses
+        parts = response.split("swift:")
+        carol_text = parts[0].strip()
+        swift_text = parts[1].strip() if len(parts) > 1 else "(no response)"
+
+        print(f"Carol (truth): {carol_text}")
+        print(f"Swift (lies):  {swift_text}\n")
 
 
 if __name__ == "__main__":
